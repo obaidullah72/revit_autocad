@@ -1,0 +1,99 @@
+{% extends "automation/base.html" %}
+
+{% block title %}Run Details · Lighting Automation Studio{% endblock %}
+
+{% block content %}
+    <header class="page-header">
+        <div>
+            <h2 class="page-title">
+                {{ plan.name|default:"Uploaded plan" }}
+            </h2>
+            <p class="page-subtitle">
+                Created {{ plan.created_at|date:"Y-m-d H:i" }}
+            </p>
+        </div>
+        {% if processed %}
+            <div class="status-badge">
+                <span class="pill pill-{{ processed.status|lower }}">{{ processed.status }}</span>
+            </div>
+        {% endif %}
+    </header>
+
+    <section class="detail-grid">
+        <section class="card card-main">
+            <header class="card-header">
+                <h3 class="card-title">Files</h3>
+                <p class="card-subtitle">Download the original upload and the processed output.</p>
+            </header>
+
+            <dl class="definition-list">
+                <div class="definition-row">
+                    <dt>Original file</dt>
+                    <dd><a href="{{ plan.original_file.url }}" target="_blank">Download source</a></dd>
+                </div>
+                {% if processed and processed.output_file %}
+                    <div class="definition-row">
+                        <dt>Processed output</dt>
+                        <dd><a href="{{ processed.output_file.url }}" target="_blank">Download after.dxf</a></dd>
+                    </div>
+                {% endif %}
+            </dl>
+
+            <p class="back-link">
+                <a href="{% url 'automation:upload' %}">← Run automation on another plan</a>
+            </p>
+        </section>
+
+        <section class="card card-side">
+            <header class="card-header">
+                <h3 class="card-title">Processing summary</h3>
+            </header>
+
+            {% if processed %}
+                {% if processed_summary %}
+                    <div class="metrics-grid">
+                        <div class="metric">
+                            <div class="metric-label">Rooms detected</div>
+                            <div class="metric-value">{{ processed_summary.rooms }}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Doors detected</div>
+                            <div class="metric-value">{{ processed_summary.doors }}</div>
+                        </div>
+                    </div>
+                {% endif %}
+
+                {% if processed.log %}
+                    <details class="log-panel">
+                        <summary>Show processing log</summary>
+                        <pre class="log-body">{{ processed.log }}</pre>
+                    </details>
+                {% endif %}
+            {% else %}
+                <p>No processing information is available for this plan.</p>
+            {% endif %}
+        </section>
+
+        <section class="card card-wide">
+            <header class="card-header">
+                <h3 class="card-title">What to do next</h3>
+            </header>
+            <ol class="steps">
+                <li>
+                    <h4>Open the processed DXF</h4>
+                    <p>Use AutoCAD, Revit or another DXF viewer to inspect the layout.</p>
+                </li>
+                <li>
+                    <h4>Check block placement</h4>
+                    <p>Verify LIGHT_BLOCK, FAN_BLOCK and SWITCH_BLOCK positions in each room.</p>
+                </li>
+                <li>
+                    <h4>Adjust and iterate</h4>
+                    <p>Refine the CAD drawing or rule parameters and upload a new version.</p>
+                </li>
+            </ol>
+        </section>
+    </section>
+{% endblock %}
+
+

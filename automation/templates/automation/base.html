@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Lighting Automation Studio{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'automation/style.css' %}">
+</head>
+<body class="shell">
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">
+                <div class="brand-mark">
+                    <span class="brand-glyph"></span>
+                </div>
+                <div>
+                    <h1 class="brand-title">Lighting Automation Studio</h1>
+                    <p class="brand-subtitle">Turn CAD floor plans into smart lighting layouts.</p>
+                </div>
+            </div>
+            <nav class="topnav">
+                <a href="{% url 'automation:upload' %}" class="topnav-link">New run</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="page">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <span>Lighting Automation POC</span>
+            <span class="footer-hint">Built for fast experimentation with DXF/DWG plans.</span>
+        </div>
+    </footer>
+</body>
+</html>
+
+

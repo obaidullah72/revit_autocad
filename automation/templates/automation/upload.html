@@ -1,0 +1,159 @@
+{% extends "automation/base.html" %}
+
+{% block title %}New Run · Lighting Automation Studio{% endblock %}
+
+{% block content %}
+    <header class="page-header">
+        <div>
+            <h2 class="page-title">New automation run</h2>
+            <p class="page-subtitle">
+                Upload a DXF or DWG, set high‑level rules, and download an <code>after.dxf</code> with
+                lights, switches and fans placed for you.
+            </p>
+        </div>
+    </header>
+
+    <section class="dashboard-grid">
+        <section class="card card-main">
+            {% if error %}
+                <div class="alert alert-error">{{ error }}</div>
+            {% endif %}
+
+            <form method="post" enctype="multipart/form-data" class="form-two-col">
+                {% csrf_token %}
+
+                <div class="form-stack">
+                    <div class="field">
+                        <label for="name">Plan name</label>
+                        <input id="name" name="name" type="text" placeholder="e.g. Residential Tower · Level 03">
+                    </div>
+
+                    <div class="field">
+                        <label for="file">Drawing file</label>
+                        <input id="file" name="file" type="file" accept=".dxf,.dwg" required>
+                        <p class="field-help">
+                            DXF is preferred. DWG will only work if a converter is configured on the server.
+                        </p>
+                    </div>
+                </div>
+
+                <section class="rules-panel">
+                    <div class="field-group">
+                        <div class="field-group-title">Automation rules</div>
+                        <div class="field-row">
+                            <label for="lights_per_room">Lights per room</label>
+                            <input id="lights_per_room" name="lights_per_room" type="number" min="1"
+                                   value="{{ default_lights_per_room|default:1 }}">
+                        </div>
+                        <div class="field-row">
+                            <label for="switches_per_door">Switches per door</label>
+                            <input id="switches_per_door" name="switches_per_door" type="number" min="1"
+                                   value="{{ default_switches_per_door|default:1 }}">
+                        </div>
+                        <div class="field-row">
+                            <label for="fans_per_room">Fans per room</label>
+                            <input id="fans_per_room" name="fans_per_room" type="number" min="0"
+                                   value="{{ default_fans_per_room|default:0 }}">
+                        </div>
+                        <div class="field-row">
+                            <label for="sockets_enabled">
+                                <input id="sockets_enabled" name="sockets_enabled" type="checkbox" checked>
+                                Enable sockets/outlets
+                            </label>
+                        </div>
+                        <div class="field-row">
+                            <label for="socket_spacing">Socket spacing (mm)</label>
+                            <input id="socket_spacing" name="socket_spacing" type="number" min="500" step="100"
+                                   value="3000" placeholder="3000 (default)">
+                            <p class="field-help">Standard spacing: 3000mm. Leave empty for default.</p>
+                        </div>
+                        <div class="field-row">
+                            <label for="use_legacy_mode">
+                                <input id="use_legacy_mode" name="use_legacy_mode" type="checkbox">
+                                Use legacy placement mode
+                            </label>
+                            <p class="field-help">Use simple placement logic (for backward compatibility).</p>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="form-stack">
+                    <button type="submit" class="btn-primary btn-large">Run automation</button>
+                </div>
+            </form>
+        </section>
+
+        <aside class="card card-side">
+            <h3 class="side-title">Before you upload</h3>
+            <ul class="checklist">
+                <li>
+                    <span class="check-label">ROOM layer</span>
+                    <span class="check-text">Closed LWPOLYLINE/POLYLINE outlining each room or space.</span>
+                </li>
+                <li>
+                    <span class="check-label">WALL layer</span>
+                    <span class="check-text">LINE entities representing walls (optional, improves placement).</span>
+                </li>
+                <li>
+                    <span class="check-label">DOOR layer</span>
+                    <span class="check-text">INSERT blocks used as anchor points for switches.</span>
+                </li>
+                <li>
+                    <span class="check-label">WINDOW layer</span>
+                    <span class="check-text">INSERT blocks for windows (optional, avoids placement zones).</span>
+                </li>
+                <li>
+                    <span class="check-label">Units</span>
+                    <span class="check-text">Plans should be in millimetres for sensible spacing.</span>
+                </li>
+            </ul>
+            <p class="side-note">
+                Try the sample drawing <code>poc_sample_floorplan_mm.dxf</code> to see the rules in action.
+            </p>
+        </aside>
+    </section>
+
+    {% if recent_plans %}
+        <section class="card card-table">
+            <header class="card-header">
+                <h3 class="card-title">Recent runs</h3>
+                <p class="card-subtitle">
+                    Re‑open a previous upload to view its status and download the processed DXF.
+                </p>
+            </header>
+
+            <table class="table">
+                <thead>
+                <tr>
+                    <th>Plan</th>
+                    <th>Created</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for p in recent_plans %}
+                    <tr>
+                        <td>{{ p.name|default:"Plan " | add:p.id }}</td>
+                        <td>{{ p.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>
+                            {% if p.processed_output %}
+                                <span class="pill pill-{{ p.processed_output.status|lower }}">
+                                    {{ p.processed_output.status }}
+                                </span>
+                            {% else %}
+                                <span class="pill pill-pending">PENDING</span>
+                            {% endif %}
+                        </td>
+                        <td class="table-actions">
+                            <a href="{% url 'automation:plan_detail' p.id %}" class="btn-ghost">Open</a>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </section>
+    {% endif %}
+{% endblock %}
+
+
