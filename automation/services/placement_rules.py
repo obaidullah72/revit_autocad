@@ -35,42 +35,85 @@ class PlacementRules:
         count: int = 1
     ) -> list[Point3D]:
         """
-        Place switches near a door along the wall.
+        Place switches near a door along the wall on the side where door opens.
         
         Rules:
-        - Place on wall surface
-        - Near corresponding door
+        - Place on wall surface on the swing side (where door opens)
+        - Standard distance: 150-200mm from door frame
         - Height: ~1400mm from finished floor level
-        - Avoid door swing and window zones
+        - Avoid door swing zone and window zones
         """
         placements: list[Point3D] = []
         
         # Find nearest wall to door
         nearest_wall = self.analyzer.find_nearest_wall(door.position)
         if not nearest_wall:
-            # Fallback: place switches offset from door
-            wall_normal = self._get_door_wall_normal(door)
+            # Fallback: determine swing side and place switches
+            swing_normal = self.analyzer.get_door_swing_side(door, room)
             for i in range(count):
-                offset = 300.0 + i * 300.0  # 300mm spacing
-                x = door.position.x + wall_normal[0] * offset
-                y = door.position.y + wall_normal[1] * offset
+                # Place switches along the swing side, starting 200mm from door
+                offset_along_wall = 200.0 + i * 300.0  # 200mm from door, 300mm spacing
+                # Offset perpendicular to get on wall surface
+                offset_perp = 10.0  # 10mm inside room
+                
+                # Calculate position
+                door_angle = math.radians(door.rotation)
+                wall_dir = (math.cos(door_angle + math.pi/2), math.sin(door_angle + math.pi/2))
+                
+                x = door.position.x + wall_dir[0] * offset_along_wall + swing_normal[0] * offset_perp
+                y = door.position.y + wall_dir[1] * offset_along_wall + swing_normal[1] * offset_perp
                 z = self.analyzer.get_floor_level(room) + self.SWITCH_HEIGHT
                 placements.append(Point3D(x, y, z))
             return placements
         
-        # Place switches along wall, avoiding door swing zone
-        wall_dir = nearest_wall.get_direction()
-        wall_normal = nearest_wall.get_normal()
+        # Get the swing side (where door opens)
+        swing_normal = self.analyzer.get_door_swing_side(door, room)
         
         # Project door onto wall line
         door_proj = self._project_point_to_wall(nearest_wall, door.position)
         
-        # Start placement offset from door (to the right side, typically)
-        start_offset = 300.0  # Start 300mm from door
-        spacing = 300.0  # 300mm between switches
+        # Get wall direction
+        wall_dir = nearest_wall.get_direction()
+        
+        # Determine which direction along the wall is on the swing side
+        # Test both directions to see which is closer to swing side
+        test_point_1 = Point3D(
+            door_proj.x + wall_dir[0] * 200.0,
+            door_proj.y + wall_dir[1] * 200.0,
+            door_proj.z
+        )
+        test_point_2 = Point3D(
+            door_proj.x - wall_dir[0] * 200.0,
+            door_proj.y - wall_dir[1] * 200.0,
+            door_proj.z
+        )
+        
+        # Calculate which direction aligns better with swing side
+        vec1 = (test_point_1.x - door.position.x, test_point_1.y - door.position.y)
+        vec2 = (test_point_2.x - door.position.x, test_point_2.y - door.position.y)
+        
+        # Normalize vectors
+        len1 = math.sqrt(vec1[0]**2 + vec1[1]**2)
+        len2 = math.sqrt(vec2[0]**2 + vec2[1]**2)
+        if len1 > 0:
+            vec1 = (vec1[0]/len1, vec1[1]/len1)
+        if len2 > 0:
+            vec2 = (vec2[0]/len2, vec2[1]/len2)
+        
+        # Dot product with swing normal to determine direction
+        dot1 = vec1[0] * swing_normal[0] + vec1[1] * swing_normal[1]
+        dot2 = vec2[0] * swing_normal[0] + vec2[1] * swing_normal[1]
+        
+        # Use direction with higher dot product (more aligned with swing)
+        if abs(dot2) > abs(dot1):
+            wall_dir = (-wall_dir[0], -wall_dir[1])
+        
+        # Standard switch placement: 150-200mm from door frame on swing side
+        start_offset = 200.0  # Start 200mm from door (on swing side)
+        spacing = 300.0  # 300mm spacing between multiple switches
         
         for i in range(count):
-            # Calculate position along wall
+            # Calculate position along wall on swing side
             offset = start_offset + i * spacing
             
             # Position along wall direction
@@ -85,26 +128,39 @@ class PlacementRules:
                 height=self.SWITCH_HEIGHT
             )
             
-            # Check if placement avoids door swing zone
-            if not self.analyzer.avoid_door_swing_zone(
-                door,
-                wall_surface_point,
-                clearance=1000.0
-            ):
-                # Check if placement avoids windows
-                windows = self.analyzer.find_windows_for_room(room)
-                too_close_to_window = False
-                for window in windows:
-                    if self.analyzer.avoid_window_zone(
-                        window,
-                        wall_surface_point,
-                        clearance=self.MIN_CLEARANCE_SWITCH_WINDOW
-                    ):
-                        too_close_to_window = True
-                        break
+            # Verify placement is on swing side (where door opens)
+            # Check that point is in the general direction of swing
+            to_switch = (wall_surface_point.x - door.position.x, wall_surface_point.y - door.position.y)
+            to_switch_len = math.sqrt(to_switch[0]**2 + to_switch[1]**2)
+            if to_switch_len > 0:
+                to_switch = (to_switch[0]/to_switch_len, to_switch[1]/to_switch_len)
+                swing_alignment = to_switch[0] * swing_normal[0] + to_switch[1] * swing_normal[1]
                 
-                if not too_close_to_window:
-                    placements.append(wall_surface_point)
+                # Only place if reasonably aligned with swing side (cosine > 0.3)
+                if swing_alignment > 0.3:
+                    # Check if placement avoids windows
+                    windows = self.analyzer.find_windows_for_room(room)
+                    too_close_to_window = False
+                    for window in windows:
+                        if self.analyzer.avoid_window_zone(
+                            window,
+                            wall_surface_point,
+                            clearance=self.MIN_CLEARANCE_SWITCH_WINDOW
+                        ):
+                            too_close_to_window = True
+                            break
+                    
+                    if not too_close_to_window:
+                        placements.append(wall_surface_point)
+        
+        # If no placements found, try fallback placement
+        if not placements:
+            for i in range(count):
+                offset = 200.0 + i * 300.0
+                x = door_proj.x + wall_dir[0] * offset
+                y = door_proj.y + wall_dir[1] * offset
+                z = self.analyzer.get_floor_level(room) + self.SWITCH_HEIGHT
+                placements.append(Point3D(x, y, z))
         
         return placements
 

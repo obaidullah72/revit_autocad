@@ -11,6 +11,19 @@ from dataclasses import dataclass, field
 from enum import Enum
 import math
 
+try:
+    import ezdxf
+    EZDXF_AVAILABLE = True
+except ImportError:
+    EZDXF_AVAILABLE = False
+
+try:
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import polygonize
+    SHAPELY_AVAILABLE = True
+except ImportError:
+    SHAPELY_AVAILABLE = False
+
 
 class EntityType(Enum):
     """CAD entity types."""
@@ -174,6 +187,7 @@ class Door:
     block_name: str
     width: Optional[float] = None
     swing_angle: Optional[float] = None  # degrees
+    swing_direction: Optional[int] = None  # -1 for left, 1 for right, None for auto-detect
 
     def get_swing_zone(self, swing_radius: float = 900.0) -> list[Point3D]:
         """Estimate door swing zone (arc of possible door positions)."""
@@ -182,8 +196,13 @@ class Door:
         theta = math.radians(self.rotation)
         
         # Door opens perpendicular to rotation
-        swing_start = theta - math.radians(swing / 2)
-        swing_end = theta + math.radians(swing / 2)
+        # Typically opens to the right (clockwise) or left (counter-clockwise)
+        swing_offset = 90.0  # Perpendicular to door rotation
+        if self.swing_direction == -1:
+            swing_offset = -90.0  # Opens to the left
+        
+        swing_start = math.radians(self.rotation + swing_offset - swing / 2)
+        swing_end = math.radians(self.rotation + swing_offset + swing / 2)
         
         points = []
         steps = 10
@@ -194,6 +213,22 @@ class Door:
             points.append(Point3D(x, y, self.position.z))
         
         return points
+    
+    def get_swing_direction_vector(self) -> tuple[float, float]:
+        """
+        Get unit vector pointing in the direction where door opens.
+        
+        Returns:
+            (dx, dy) unit vector pointing to swing side
+        """
+        # Door typically opens perpendicular to its rotation
+        # Standard: opens to the right (clockwise) when facing door
+        swing_angle = self.rotation + 90.0
+        if self.swing_direction == -1:
+            swing_angle = self.rotation - 90.0
+        
+        theta = math.radians(swing_angle)
+        return (math.cos(theta), math.sin(theta))
 
 
 @dataclass
@@ -233,9 +268,19 @@ class GeometryParser:
         self.file_path = file_path
         self.lines: list[str] = []
         self.geometry = CADGeometry()
+        self.doc = None
 
     def parse(self) -> CADGeometry:
         """Parse the CAD file and extract all geometry."""
+        # Try using ezdxf first for better parsing
+        if EZDXF_AVAILABLE:
+            try:
+                return self._parse_with_ezdxf()
+            except Exception:
+                # Fall back to text parsing if ezdxf fails
+                pass
+        
+        # Fallback to text-based parsing
         self.lines = self.file_path.read_text(errors="ignore").splitlines()
         
         # Detect if file contains 3D entities
@@ -244,11 +289,296 @@ class GeometryParser:
         # Parse entities
         self._parse_rooms()
         self._parse_walls()
+
+        # If no explicit rooms were found but we do have walls,
+        # try to infer room polygons from the wall graph.
+        if not self.geometry.rooms and self.geometry.walls:
+            self._infer_rooms_from_walls()
+
         self._parse_doors()
         self._parse_windows()
         self._parse_floor_levels()
         
         return self.geometry
+    
+    def _parse_with_ezdxf(self) -> CADGeometry:
+        """Parse using ezdxf library for better accuracy."""
+        try:
+            # Try to read as DXF first
+            self.doc = ezdxf.readfile(str(self.file_path))
+        except Exception:
+            # If that fails, try reading as DWG (requires ezdxf with DWG support)
+            try:
+                self.doc = ezdxf.readfile(str(self.file_path))
+            except Exception:
+                raise
+        
+        modelspace = self.doc.modelspace()
+        
+        # Detect 3D
+        self.geometry.is_3d = self._detect_3d_ezdxf(modelspace)
+        
+        # Parse rooms (closed polylines on ROOM layer)
+        self._parse_rooms_ezdxf(modelspace)
+        
+        # Parse walls (lines/polylines on WALL layer)
+        self._parse_walls_ezdxf(modelspace)
+        
+        # Parse doors (INSERT blocks on DOOR layer)
+        self._parse_doors_ezdxf(modelspace)
+        
+        # Parse windows (INSERT blocks on WINDOW layer)
+        self._parse_windows_ezdxf(modelspace)
+        
+        # Parse floor levels
+        self._parse_floor_levels()
+        
+        return self.geometry
+    
+    def _detect_3d_ezdxf(self, modelspace) -> bool:
+        """Detect if file contains 3D entities using ezdxf."""
+        for entity in modelspace:
+            if entity.dxftype() in ["3DPOLYLINE", "3DFACE", "SOLID", "EXTRUDED_SURFACE"]:
+                return True
+            # Check if entity has Z coordinates
+            if hasattr(entity, "start") and hasattr(entity.start, "z"):
+                if entity.start.z != 0:
+                    return True
+        return False
+    
+    def _is_room_layer(self, layer_name: str) -> bool:
+        """
+        Check if layer name indicates a room / space.
+
+        This is intentionally generous – many architects use various
+        naming conventions for architectural spaces.
+        """
+        layer_upper = layer_name.upper()
+        room_keywords = [
+            "ROOM",
+            "SPACE",
+            "AREA",
+            "ZONE",
+            "RM_",
+            "A-AREA",
+            "A-SPACE",
+            "חדר",   # Hebrew: room
+            "מרחב",  # Hebrew: space
+        ]
+        non_room_keywords = [
+            "DOOR",
+            "WINDOW",
+            "WALL",
+            "GRID",
+            "COL",
+            "COLUMN",
+            "STAIR",
+            "CORE",
+            "AXIS",
+            "DIM",
+            "TEXT",
+        ]
+        if any(bad in layer_upper for bad in non_room_keywords):
+            return False
+        return any(keyword in layer_upper for keyword in room_keywords)
+    
+    def _parse_rooms_ezdxf(self, modelspace) -> None:
+        """Parse rooms using ezdxf - flexible layer detection."""
+        for entity in modelspace:
+            layer_name = entity.dxf.layer.upper()
+            entity_type = entity.dxftype()
+            
+            # Check if it's a potential room entity
+            if entity_type not in ["LWPOLYLINE", "POLYLINE", "LINE", "SPLINE"]:
+                continue
+            
+            # Try to detect rooms: either on ROOM layer OR closed polylines
+            is_room_layer = self._is_room_layer(layer_name)
+            
+            if entity_type in ["LWPOLYLINE", "POLYLINE"]:
+                try:
+                    # Get vertices
+                    vertices = []
+                    if entity_type == "LWPOLYLINE":
+                        for point in entity.vertices():
+                            vertices.append(Point3D(point[0], point[1], point[2] if len(point) > 2 else 0.0))
+                    else:
+                        for vertex in entity.vertices:
+                            vertices.append(Point3D(vertex.dxf.location.x, vertex.dxf.location.y, vertex.dxf.location.z))
+                    
+                    if len(vertices) >= 3:
+                        # Check if closed
+                        is_closed = False
+                        if hasattr(entity.dxf, "flags"):
+                            is_closed = bool(entity.dxf.flags & 1)
+                        
+                        # Check if first and last vertices are close (within 10mm)
+                        if not is_closed and len(vertices) >= 3:
+                            if vertices[0].distance_to(vertices[-1]) < 10.0:
+                                is_closed = True
+                        
+                        # Accept if: (1) on room layer OR (2) closed polyline with reasonable area
+                        if is_room_layer or (is_closed and len(vertices) >= 4):
+                            # Calculate area to filter out very small shapes
+                            room = Room(
+                                vertices=vertices,
+                                layer=entity.dxf.layer,
+                                floor_level=0.0
+                            )
+                            area = room.get_area()
+                            
+                            # Only add if area is reasonable (at least 1 m² = 1,000,000 mm²)
+                            if area > 1000000.0:  # 1 square meter minimum
+                                floor_level = 0.0
+                                if hasattr(entity.dxf, "elevation"):
+                                    floor_level = entity.dxf.elevation
+                                room.floor_level = floor_level
+                                self.geometry.rooms.append(room)
+                except Exception:
+                    continue
+    
+    def _is_wall_layer(self, layer_name: str) -> bool:
+        """Check if layer name indicates a wall."""
+        layer_upper = layer_name.upper()
+        wall_keywords = ["WALL", "קיר", "מחיצה"]  # Hebrew: wall, partition
+        return any(keyword in layer_upper for keyword in wall_keywords)
+    
+    def _parse_walls_ezdxf(self, modelspace) -> None:
+        """Parse walls using ezdxf - flexible detection."""
+        for entity in modelspace:
+            layer_name = entity.dxf.layer.upper()
+            entity_type = entity.dxftype()
+            
+            # Check if it's a wall layer
+            is_wall_layer = self._is_wall_layer(layer_name)
+            
+            if entity_type == "LINE" and is_wall_layer:
+                try:
+                    start = Point3D(
+                        entity.dxf.start.x,
+                        entity.dxf.start.y,
+                        entity.dxf.start.z if hasattr(entity.dxf.start, "z") else 0.0
+                    )
+                    end = Point3D(
+                        entity.dxf.end.x,
+                        entity.dxf.end.y,
+                        entity.dxf.end.z if hasattr(entity.dxf.end, "z") else 0.0
+                    )
+                    # Only add if line has reasonable length (at least 100mm)
+                    if start.distance_to(end) > 100.0:
+                        wall = Wall(
+                            start=start,
+                            end=end,
+                            layer=entity.dxf.layer
+                        )
+                        self.geometry.walls.append(wall)
+                except Exception:
+                    continue
+            elif entity_type in ["LWPOLYLINE", "POLYLINE"] and is_wall_layer:
+                try:
+                    # Convert polyline segments to wall segments
+                    vertices = []
+                    if entity_type == "LWPOLYLINE":
+                        for point in entity.vertices():
+                            vertices.append((point[0], point[1], point[2] if len(point) > 2 else 0.0))
+                    else:
+                        for vertex in entity.vertices:
+                            vertices.append((vertex.dxf.location.x, vertex.dxf.location.y, vertex.dxf.location.z))
+                    
+                    for i in range(len(vertices) - 1):
+                        v1 = vertices[i]
+                        v2 = vertices[i + 1]
+                        # Only add if segment has reasonable length
+                        if math.sqrt((v2[0]-v1[0])**2 + (v2[1]-v1[1])**2) > 100.0:
+                            wall = Wall(
+                                start=Point3D(v1[0], v1[1], v1[2]),
+                                end=Point3D(v2[0], v2[1], v2[2]),
+                                layer=entity.dxf.layer
+                            )
+                            self.geometry.walls.append(wall)
+                except Exception:
+                    continue
+    
+    def _is_door_layer(self, layer_name: str) -> bool:
+        """Check if layer name indicates a door."""
+        layer_upper = layer_name.upper()
+        door_keywords = ["DOOR", "דלת", "פתח"]  # Hebrew: door, opening
+        return any(keyword in layer_upper for keyword in door_keywords)
+    
+    def _is_door_block(self, block_name: str) -> bool:
+        """Check if block name indicates a door."""
+        block_upper = block_name.upper()
+        door_keywords = ["DOOR", "דלת", "פתח"]
+        return any(keyword in block_upper for keyword in door_keywords)
+    
+    def _parse_doors_ezdxf(self, modelspace) -> None:
+        """Parse doors using ezdxf - flexible detection."""
+        for entity in modelspace:
+            if entity.dxftype() != "INSERT":
+                continue
+            
+            layer_name = entity.dxf.layer.upper()
+            block_name = entity.dxf.name.upper()
+            
+            # Check if it's a door: on DOOR layer OR has door in block name
+            is_door_layer = self._is_door_layer(layer_name)
+            is_door_block = self._is_door_block(block_name)
+            
+            if is_door_layer or is_door_block:
+                try:
+                    insert_point = entity.dxf.insert
+                    rotation = entity.dxf.rotation if hasattr(entity.dxf, "rotation") else 0.0
+                    
+                    # Try to get door width from attributes or block definition
+                    width = None
+                    if hasattr(entity, "attribs"):
+                        for attrib in entity.attribs:
+                            if attrib.dxf.tag.upper() in ["WIDTH", "W", "רוחב"]:
+                                try:
+                                    width = float(attrib.dxf.text)
+                                except ValueError:
+                                    pass
+                    
+                    # If width not found, try to get from block scale
+                    if width is None and hasattr(entity.dxf, "xscale"):
+                        # Sometimes door width is encoded in scale
+                        scale = entity.dxf.xscale
+                        if 0.5 < scale < 2.0:  # Reasonable door width range
+                            width = scale * 1000.0  # Approximate conversion
+                    
+                    door = Door(
+                        position=Point3D(insert_point.x, insert_point.y, insert_point.z if hasattr(insert_point, "z") else 0.0),
+                        rotation=math.degrees(rotation) if rotation else 0.0,
+                        layer=entity.dxf.layer,
+                        block_name=entity.dxf.name,
+                        width=width
+                    )
+                    self.geometry.doors.append(door)
+                except Exception:
+                    continue
+    
+    def _parse_windows_ezdxf(self, modelspace) -> None:
+        """Parse windows using ezdxf."""
+        for entity in modelspace:
+            layer_name = entity.dxf.layer.upper()
+            if "WINDOW" not in layer_name:
+                continue
+            
+            if entity.dxftype() == "INSERT":
+                try:
+                    insert_point = entity.dxf.insert
+                    rotation = entity.dxf.rotation if hasattr(entity.dxf, "rotation") else 0.0
+                    block_name = entity.dxf.name
+                    
+                    window = Window(
+                        position=Point3D(insert_point.x, insert_point.y, insert_point.z if hasattr(insert_point, "z") else 0.0),
+                        rotation=math.degrees(rotation) if rotation else 0.0,
+                        layer=entity.dxf.layer,
+                        block_name=block_name
+                    )
+                    self.geometry.windows.append(window)
+                except Exception:
+                    continue
 
     def _detect_3d(self) -> bool:
         """Detect if file contains 3D entities."""
@@ -261,7 +591,7 @@ class GeometryParser:
         return False
 
     def _parse_rooms(self) -> None:
-        """Parse room entities (closed LWPOLYLINE/POLYLINE on ROOM layer)."""
+        """Parse room entities (closed LWPOLYLINE/POLYLINE on ROOM layer or any closed polyline)."""
         i = 0
         current_entity = None
         current_layer = None
@@ -270,6 +600,7 @@ class GeometryParser:
         pending_y: Optional[float] = None
         pending_z: Optional[float] = None
         floor_level = 0.0
+        is_closed = False
         
         while i < len(self.lines) - 1:
             code = self.lines[i].strip()
@@ -277,14 +608,17 @@ class GeometryParser:
             
             if code == "0":
                 # Finalize previous room
-                if current_entity in ["LWPOLYLINE", "POLYLINE"] and current_layer and "ROOM" in current_layer.upper():
-                    if len(vertices) >= 3:
+                if current_entity in ["LWPOLYLINE", "POLYLINE"]:
+                    is_room_layer = current_layer and self._is_room_layer(current_layer)
+                    if len(vertices) >= 3 and (is_room_layer or (is_closed and len(vertices) >= 4)):
                         room = Room(
                             vertices=list(vertices),
-                            layer=current_layer,
+                            layer=current_layer or "UNKNOWN",
                             floor_level=floor_level
                         )
-                        self.geometry.rooms.append(room)
+                        # Avoid tiny artifacts but be generous on area threshold
+                        if room.get_area() > 1.0:
+                            self.geometry.rooms.append(room)
                 
                 # Start new entity
                 current_entity = value
@@ -292,9 +626,17 @@ class GeometryParser:
                 vertices = []
                 pending_x = pending_y = pending_z = None
                 floor_level = 0.0
+                is_closed = False
             
             elif code == "8":  # Layer
                 current_layer = value
+            
+            elif code == "70":  # Flags (for closed polyline)
+                try:
+                    flags = int(value)
+                    is_closed = bool(flags & 1)  # Bit 1 = closed polyline
+                except ValueError:
+                    pass
             
             elif code == "38":  # Elevation (Z for 2D)
                 try:
@@ -302,42 +644,46 @@ class GeometryParser:
                 except ValueError:
                     pass
             
-            # Collect vertices
-            if current_entity in ["LWPOLYLINE", "POLYLINE"]:
-                if code == "10":  # X
-                    try:
-                        pending_x = float(value)
-                    except ValueError:
-                        pass
-                elif code == "20":  # Y
-                    try:
-                        pending_y = float(value)
-                    except ValueError:
-                        pass
-                elif code == "30":  # Z
-                    try:
-                        pending_z = float(value)
-                    except ValueError:
-                        pass
-                    if pending_x is not None and pending_y is not None:
-                        z = pending_z if pending_z is not None else floor_level
-                        vertices.append(Point3D(pending_x, pending_y, z))
-                        pending_x = pending_y = pending_z = None
+        # Collect vertices
+        if current_entity in ["LWPOLYLINE", "POLYLINE"]:
+            # Many 2D LWPOLYLINEs only provide 10/20 (X/Y) pairs; Z is optional.
+            if code == "10":  # X
+                try:
+                    pending_x = float(value)
+                except ValueError:
+                    pending_x = None
+            elif code == "20":  # Y
+                try:
+                    pending_y = float(value)
+                except ValueError:
+                    pending_y = None
+                # When we have an X/Y pair, create a vertex immediately.
+                if pending_x is not None:
+                    z = pending_z if pending_z is not None else floor_level
+                    vertices.append(Point3D(pending_x, pending_y if pending_y is not None else 0.0, z))
+                    pending_x = pending_y = pending_z = None
+            elif code == "30":  # Z (optional)
+                try:
+                    pending_z = float(value)
+                except ValueError:
+                    pending_z = None
             
             i += 2
         
         # Finalize last room
-        if current_entity in ["LWPOLYLINE", "POLYLINE"] and current_layer and "ROOM" in current_layer.upper():
-            if len(vertices) >= 3:
+        if current_entity in ["LWPOLYLINE", "POLYLINE"]:
+            is_room_layer = current_layer and self._is_room_layer(current_layer)
+            if len(vertices) >= 3 and (is_room_layer or (is_closed and len(vertices) >= 4)):
                 room = Room(
                     vertices=list(vertices),
-                    layer=current_layer,
+                    layer=current_layer or "UNKNOWN",
                     floor_level=floor_level
                 )
-                self.geometry.rooms.append(room)
+                if room.get_area() > 1.0:
+                    self.geometry.rooms.append(room)
 
     def _parse_walls(self) -> None:
-        """Parse wall entities (LINE, LWPOLYLINE, POLYLINE, SOLID, 3DFACE on WALL layer)."""
+        """Parse wall entities (LINE on WALL layer)."""
         i = 0
         current_entity = None
         current_layer = None
@@ -353,14 +699,16 @@ class GeometryParser:
             
             if code == "0":
                 # Finalize previous wall
-                if current_entity == "LINE" and current_layer and "WALL" in current_layer.upper():
+                if current_entity == "LINE" and current_layer and self._is_wall_layer(current_layer):
                     if start_point and end_point:
-                        wall = Wall(
-                            start=start_point,
-                            end=end_point,
-                            layer=current_layer
-                        )
-                        self.geometry.walls.append(wall)
+                        # Only add if line has reasonable length
+                        if start_point.distance_to(end_point) > 100.0:
+                            wall = Wall(
+                                start=start_point,
+                                end=end_point,
+                                layer=current_layer
+                            )
+                            self.geometry.walls.append(wall)
                 
                 # Start new entity
                 current_entity = value
@@ -415,8 +763,8 @@ class GeometryParser:
             i += 2
         
         # Finalize last wall
-        if current_entity == "LINE" and current_layer and "WALL" in current_layer.upper():
-            if start_point and end_point:
+        if current_entity == "LINE" and current_layer and self._is_wall_layer(current_layer):
+            if start_point and end_point and start_point.distance_to(end_point) > 100.0:
                 wall = Wall(
                     start=start_point,
                     end=end_point,
@@ -424,8 +772,70 @@ class GeometryParser:
                 )
                 self.geometry.walls.append(wall)
 
+    def _infer_rooms_from_walls(self) -> None:
+        """
+        Infer room polygons from the wall network using shapely.polygonize.
+
+        This is a best-effort heuristic for architectural plans that don't
+        contain explicit room polylines. It:
+        - Builds line strings from wall segments
+        - Polygonizes them into closed cells
+        - Filters out very small polygons
+        - Skips the outermost boundary polygon (overall building outline)
+        """
+        if not SHAPELY_AVAILABLE:
+            return
+
+        if not self.geometry.walls:
+            return
+
+        # Build LineStrings from wall segments (2D only).
+        lines: list[LineString] = []
+        for wall in self.geometry.walls:
+            p1 = (wall.start.x, wall.start.y)
+            p2 = (wall.end.x, wall.end.y)
+            # Skip degenerate segments
+            if p1 == p2:
+                continue
+            lines.append(LineString([p1, p2]))
+
+        if not lines:
+            return
+
+        try:
+            polys = list(polygonize(lines))
+        except Exception:
+            return
+
+        if not polys:
+            return
+
+        # Heuristics:
+        # - Ignore polygons that are extremely tiny (noise)
+        #   Use a very small threshold so halls, toilets, and other areas
+        #   are all considered rooms.
+        MIN_ROOM_AREA = 1000.0
+
+        for poly in polys:
+            area = poly.area
+            if area < MIN_ROOM_AREA:
+                continue
+
+            # Convert polygon exterior to a Room.
+            coords = list(poly.exterior.coords)
+            vertices = [Point3D(x=c[0], y=c[1], z=0.0) for c in coords]
+            if len(vertices) < 3:
+                continue
+
+            room = Room(
+                vertices=vertices,
+                layer="INFERRED_ROOM",
+                floor_level=0.0,
+            )
+            self.geometry.rooms.append(room)
+
     def _parse_doors(self) -> None:
-        """Parse door entities (INSERT blocks on DOOR layer)."""
+        """Parse door entities (INSERT blocks on DOOR layer or with door in block name)."""
         i = 0
         current_entity = None
         current_layer = None
@@ -441,13 +851,16 @@ class GeometryParser:
             
             if code == "0":
                 # Finalize previous door
-                if current_entity == "INSERT" and current_layer and "DOOR" in current_layer.upper():
-                    if insert_x is not None and insert_y is not None:
+                if current_entity == "INSERT":
+                    is_door_layer = current_layer and self._is_door_layer(current_layer)
+                    is_door_block = self._is_door_block(block_name)
+                    
+                    if (is_door_layer or is_door_block) and insert_x is not None and insert_y is not None:
                         z = insert_z if insert_z is not None else 0.0
                         door = Door(
                             position=Point3D(insert_x, insert_y, z),
                             rotation=rotation,
-                            layer=current_layer,
+                            layer=current_layer or "UNKNOWN",
                             block_name=block_name
                         )
                         self.geometry.doors.append(door)
@@ -489,13 +902,16 @@ class GeometryParser:
             i += 2
         
         # Finalize last door
-        if current_entity == "INSERT" and current_layer and "DOOR" in current_layer.upper():
-            if insert_x is not None and insert_y is not None:
+        if current_entity == "INSERT":
+            is_door_layer = current_layer and self._is_door_layer(current_layer)
+            is_door_block = self._is_door_block(block_name)
+            
+            if (is_door_layer or is_door_block) and insert_x is not None and insert_y is not None:
                 z = insert_z if insert_z is not None else 0.0
                 door = Door(
                     position=Point3D(insert_x, insert_y, z),
                     rotation=rotation,
-                    layer=current_layer,
+                    layer=current_layer or "UNKNOWN",
                     block_name=block_name
                 )
                 self.geometry.doors.append(door)

@@ -13,19 +13,25 @@ from .electrical_placer import ElectricalPlacer
 
 def convert_dwg_to_dxf(dwg_path: Path, dxf_path: Path) -> None:
     """
-    Best-effort DWG -> DXF conversion via external converter.
+    DWG -> DXF conversion via external converter.
 
-    Configure the converter command with env var DWG_CONVERTER_CMD, where the
-    command is a template that accepts two placeholders: {input} and {output}.
-    Example:
-      DWG_CONVERTER_CMD="ODAFileConverter {input} {output}"
+    Requires the DWG_CONVERTER_CMD env var, where the command is a template
+    that accepts two placeholders: {input} and {output}.
+
+    Example (using a wrapper script around ODAFileConverter):
+
+        DWG_CONVERTER_CMD="dwg2dxf {input} {output}"
+
+    The wrapper script is responsible for calling ODAFileConverter with the
+    correct arguments.
     """
-
     cmd_template = os.getenv("DWG_CONVERTER_CMD")
     if not cmd_template:
         raise RuntimeError(
-            "DWG_CONVERTER_CMD not configured. Please set an external converter "
-            "command or upload DXF instead."
+            "DWG_CONVERTER_CMD is not configured.\n"
+            "Set DWG_CONVERTER_CMD to a DWG->DXF converter command, for example:\n"
+            '  DWG_CONVERTER_CMD="dwg2dxf {input} {output}"\n'
+            "where 'dwg2dxf' is a small wrapper around ODAFileConverter."
         )
 
     cmd = cmd_template.format(input=str(dwg_path), output=str(dxf_path))
@@ -434,7 +440,7 @@ def process_plan(
     try:
         input_path = Path(plan.original_file.path)
 
-        # If DWG, attempt conversion to DXF first.
+        # If DWG, always convert to DXF first via external converter.
         if input_path.suffix.lower() == ".dwg":
             try:
                 converted = input_path.with_suffix(".dxf")
@@ -443,10 +449,13 @@ def process_plan(
             except Exception as dwg_exc:
                 processed.status = ProcessedOutput.STATUS_FAILED
                 processed.log = (
-                    "Processing failed: DWG not converted.\n"
+                    "Processing failed: DWG file could not be processed.\n"
                     f"{dwg_exc}\n"
-                    "Hint: set DWG_CONVERTER_CMD env var to point to a DWG->DXF converter "
-                    "or upload DXF directly."
+                    "Hint: Install a DWG->DXF converter (e.g. ODAFileConverter),\n"
+                    "create a small wrapper script (e.g. 'dwg2dxf'), and set the\n"
+                    "DWG_CONVERTER_CMD environment variable, for example:\n"
+                    '  DWG_CONVERTER_CMD="dwg2dxf {input} {output}"\n'
+                    "Alternatively, upload DXF directly."
                 )
                 processed.save()
                 return processed

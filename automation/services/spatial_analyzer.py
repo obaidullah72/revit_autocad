@@ -219,6 +219,48 @@ class SpatialAnalyzer:
         
         return min_dist
 
+    def get_door_swing_side(self, door: Door, room: Room) -> tuple[float, float]:
+        """
+        Determine which side of the door opens (swing side).
+        
+        Returns:
+            Normal vector pointing to the swing side (where door opens)
+        """
+        # Find the wall the door is on
+        nearest_wall = self.find_nearest_wall(door.position)
+        if not nearest_wall:
+            # Fallback: use door rotation + 90 degrees
+            theta = math.radians(door.rotation + 90.0)
+            return (math.cos(theta), math.sin(theta))
+        
+        # Get wall normal (perpendicular to wall)
+        wall_normal = nearest_wall.get_normal()
+        
+        # Determine which side of the wall is inside the room
+        # Test both normals to see which points into the room
+        test_point_1 = Point3D(
+            door.position.x + wall_normal[0] * 100.0,
+            door.position.y + wall_normal[1] * 100.0,
+            door.position.z
+        )
+        test_point_2 = Point3D(
+            door.position.x - wall_normal[0] * 100.0,
+            door.position.y - wall_normal[1] * 100.0,
+            door.position.z
+        )
+        
+        # The side inside the room is where the door opens
+        if room.contains_point_2d(test_point_1):
+            return wall_normal
+        elif room.contains_point_2d(test_point_2):
+            return (-wall_normal[0], -wall_normal[1])
+        
+        # Fallback: use door rotation to estimate swing
+        # Door typically opens perpendicular to its rotation
+        swing_angle = door.rotation + 90.0
+        theta = math.radians(swing_angle)
+        return (math.cos(theta), math.sin(theta))
+    
     def avoid_door_swing_zone(
         self,
         door: Door,

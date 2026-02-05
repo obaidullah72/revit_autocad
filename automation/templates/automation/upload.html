@@ -1,25 +1,16 @@
 {% extends "automation/base.html" %}
 
 {% block title %}New Run · Lighting Automation Studio{% endblock %}
+{% block header_title %}{% endblock %}
 
 {% block content %}
-    <header class="page-header">
-        <div>
-            <h2 class="page-title">New automation run</h2>
-            <p class="page-subtitle">
-                Upload a DXF or DWG, set high‑level rules, and download an <code>after.dxf</code> with
-                lights, switches and fans placed for you.
-            </p>
-        </div>
-    </header>
-
     <section class="dashboard-grid">
-        <section class="card card-main">
+        <section class="card card-main upload-card">
             {% if error %}
                 <div class="alert alert-error">{{ error }}</div>
             {% endif %}
 
-            <form method="post" enctype="multipart/form-data" class="form-two-col">
+            <form method="post" enctype="multipart/form-data" class="form-two-col" id="automation-form">
                 {% csrf_token %}
 
                 <div class="form-stack">
@@ -51,11 +42,6 @@
                                    value="{{ default_switches_per_door|default:1 }}">
                         </div>
                         <div class="field-row">
-                            <label for="fans_per_room">Fans per room</label>
-                            <input id="fans_per_room" name="fans_per_room" type="number" min="0"
-                                   value="{{ default_fans_per_room|default:0 }}">
-                        </div>
-                        <div class="field-row">
                             <label for="sockets_enabled">
                                 <input id="sockets_enabled" name="sockets_enabled" type="checkbox" checked>
                                 Enable sockets/outlets
@@ -78,39 +64,41 @@
                 </section>
 
                 <div class="form-stack">
-                    <button type="submit" class="btn-primary btn-large">Run automation</button>
+                    <button type="submit" class="btn-primary btn-large" id="run-button">
+                        Run automation
+                    </button>
                 </div>
             </form>
+            <div id="automation-loader" class="automation-loader" style="display: none;">
+                <div class="automation-loader-backdrop"></div>
+                <div class="automation-loader-panel">
+                    <div class="automation-spinner"></div>
+                    <p>Running automation… this may take a few seconds.</p>
+                </div>
+            </div>
         </section>
 
-        <aside class="card card-side">
+        <section class="card card-side info-card">
             <h3 class="side-title">Before you upload</h3>
+            <p class="side-note">
+                Use DXF or DWG plans with clearly defined rooms and doors. The automation will place
+                ceiling lights in each detected room and switches near doors.
+            </p>
             <ul class="checklist">
                 <li>
-                    <span class="check-label">ROOM layer</span>
-                    <span class="check-text">Closed LWPOLYLINE/POLYLINE outlining each room or space.</span>
+                    <span class="check-label">ROOM geometry</span>
+                    <span class="check-text">Closed polylines outlining each room or space.</span>
                 </li>
                 <li>
-                    <span class="check-label">WALL layer</span>
-                    <span class="check-text">LINE entities representing walls (optional, improves placement).</span>
-                </li>
-                <li>
-                    <span class="check-label">DOOR layer</span>
-                    <span class="check-text">INSERT blocks used as anchor points for switches.</span>
-                </li>
-                <li>
-                    <span class="check-label">WINDOW layer</span>
-                    <span class="check-text">INSERT blocks for windows (optional, avoids placement zones).</span>
+                    <span class="check-label">Doors</span>
+                    <span class="check-text">Insert blocks or door symbols used as anchors for switches.</span>
                 </li>
                 <li>
                     <span class="check-label">Units</span>
                     <span class="check-text">Plans should be in millimetres for sensible spacing.</span>
                 </li>
             </ul>
-            <p class="side-note">
-                Try the sample drawing <code>poc_sample_floorplan_mm.dxf</code> to see the rules in action.
-            </p>
-        </aside>
+        </section>
     </section>
 
     {% if recent_plans %}
@@ -154,6 +142,22 @@
             </table>
         </section>
     {% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    (function () {
+        const form = document.getElementById("automation-form");
+        const loader = document.getElementById("automation-loader");
+        const runButton = document.getElementById("run-button");
+        if (!form || !loader || !runButton) return;
+
+        form.addEventListener("submit", function () {
+            loader.style.display = "block";
+            runButton.disabled = true;
+        });
+    })();
+</script>
 {% endblock %}
 
 

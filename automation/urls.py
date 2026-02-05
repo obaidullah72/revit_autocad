@@ -8,6 +8,7 @@ urlpatterns = [
     path("", views.upload_view, name="upload"),
     path("upload/", views.upload_view, name="upload_explicit"),
     path("file/<int:pk>/", views.plan_detail_view, name="plan_detail"),
+    path("api/run/", views.AutomationRunAPI.as_view(), name="api_run"),
 ]
 
 
