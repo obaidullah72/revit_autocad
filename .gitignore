@@ -137,6 +137,9 @@ local_settings.py
 
 .env
 db.sqlite3
+1.dwg
+1.dxf
+2.dwg
 .installed.cfg
 *.egg
 
