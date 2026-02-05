@@ -318,11 +318,18 @@ class GeometryParser:
         # Detect 3D
         self.geometry.is_3d = self._detect_3d_ezdxf(modelspace)
         
-        # Parse rooms (closed polylines on ROOM layer)
+        # Parse rooms (closed polylines on ROOM/SPACE/AREA layers)
         self._parse_rooms_ezdxf(modelspace)
         
-        # Parse walls (lines/polylines on WALL layer)
+        # Parse walls (lines/polylines on WALL layer or equivalents)
         self._parse_walls_ezdxf(modelspace)
+
+        # If we still have no explicit rooms but do have walls, try to
+        # infer rooms (cells) from the wall network. This is what should
+        # identify halls / open areas bounded by walls when the architect
+        # did not draw dedicated ROOM polylines.
+        if not self.geometry.rooms and self.geometry.walls:
+            self._infer_rooms_from_walls()
         
         # Parse doors (INSERT blocks on DOOR layer)
         self._parse_doors_ezdxf(modelspace)

@@ -19,6 +19,69 @@ class SpatialAnalyzer:
     def __init__(self, geometry: CADGeometry):
         self.geometry = geometry
 
+    # ------------------------------------------------------------------
+    # Room classification helpers
+    # ------------------------------------------------------------------
+    def classify_room_type(self, room: Room) -> str:
+        """
+        Classify a room as 'ROOM', 'HALL', or 'OPEN_AREA'.
+
+        This is a heuristic based primarily on:
+        - Layer name keywords (HALL, CORRIDOR, LOBBY, etc.)
+        - 2D area (small/medium/very large)
+        - Aspect ratio (very long and narrow → hall/corridor)
+
+        Returns:
+            One of: "ROOM", "HALL", "OPEN_AREA"
+        """
+        # 1) Layer-name driven classification (strongest signal)
+        layer_upper = (room.layer or "").upper()
+        hall_keywords = [
+            "HALL",
+            "CORRIDOR",
+            "CORR",
+            "PASSAGE",
+            "LOBBY",
+            "FOYER",
+            "LIFTL",  # lift lobby variants
+            "LOBBY",
+        ]
+        open_area_keywords = [
+            "OPEN",
+            "ATRIUM",
+            "COURT",
+            "VOID",
+        ]
+
+        if any(k in layer_upper for k in hall_keywords):
+            return "HALL"
+        if any(k in layer_upper for k in open_area_keywords):
+            return "OPEN_AREA"
+
+        # 2) Geometric heuristics
+        area = room.get_area()  # in mm²
+        min_x, min_y, max_x, max_y = room.get_bounds()
+        width = max_x - min_x
+        height = max_y - min_y
+        longer = max(width, height) or 1.0
+        shorter = min(width, height) or 1.0
+        aspect_ratio = longer / shorter
+
+        # Rough thresholds (can be tuned per project):
+        # - Very large & fairly regular → open area
+        # - Very elongated → hall / corridor
+        # - Everything else → room
+        VERY_LARGE_AREA = 80_000_000.0   # ~80 m²
+        ELONGATED_RATIO = 3.0
+
+        if area >= VERY_LARGE_AREA:
+            return "OPEN_AREA"
+
+        if aspect_ratio >= ELONGATED_RATIO:
+            return "HALL"
+
+        return "ROOM"
+
     def find_room_for_point(self, point: Point3D) -> Optional[Room]:
         """Find the room containing a given point."""
         for room in self.geometry.rooms:
